@@ -6,6 +6,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <cinttypes> // @donotremove
+
 #include <c10/util/safe_numerics.h>
 #include <executorch/runtime/core/error.h>
 #include <executorch/runtime/core/exec_aten/exec_aten.h>
@@ -58,6 +60,12 @@ Result<size_t> calculate_nbytes(
     executorch::aten::ScalarType scalar_type) {
   size_t n = 1;
   for (size_t i = 0; i < sizes.size(); i++) {
+    ET_CHECK_OR_RETURN_ERROR(
+        sizes[i] >= 0,
+        InvalidProgram,
+        "Invalid size[%zu]: %d. Size must not be negative",
+        i,
+        sizes[i]);
     size_t next_n;
     bool overflow =
         c10::mul_overflows(n, static_cast<size_t>(sizes[i]), &next_n);
@@ -92,6 +100,10 @@ Result<size_t> calculate_nbytes(
     executorch::aten::ScalarType scalar_type,
     const bool is_memory_planned,
     std::string_view name) {
+  ET_CHECK_OR_RETURN_ERROR(
+      sizes.data() != nullptr && dim_order.data() != nullptr,
+      InvalidProgram,
+      "Null sizes or dim_order in tensor metadata");
   auto nbytes = calculate_nbytes(sizes, scalar_type);
   ET_CHECK_OR_RETURN_ERROR(
       nbytes.ok(),
@@ -186,6 +198,11 @@ Result<TensorInfo> MethodMeta::input_tensor_meta(size_t index) const {
   auto input_index = s_plan_->inputs()->Get(index);
   // input_index was already validated by input_tag().
   auto tensor_value = s_plan_->values()->Get(input_index)->val_as_Tensor();
+  ET_CHECK_OR_RETURN_ERROR(
+      tensor_value != nullptr,
+      InvalidProgram,
+      "Null tensor value for input %zu",
+      index);
   return TensorInfo::create(
       Span<const int32_t>(
           tensor_value->sizes()->data(), tensor_value->sizes()->size()),
@@ -237,7 +254,11 @@ Result<TensorInfo> MethodMeta::output_tensor_meta(size_t index) const {
   auto output_index = s_plan_->outputs()->Get(index);
   // output_index was already validated by output_tag().
   auto tensor_value = s_plan_->values()->Get(output_index)->val_as_Tensor();
-
+  ET_CHECK_OR_RETURN_ERROR(
+      tensor_value != nullptr,
+      InvalidProgram,
+      "Null tensor value for output %zu",
+      index);
   return TensorInfo::create(
       Span<const int32_t>(
           tensor_value->sizes()->data(), tensor_value->sizes()->size()),
@@ -322,7 +343,14 @@ Result<int64_t> MethodMeta::memory_planned_buffer_size(size_t index) const {
       num_buffers);
   // Index zero is reserved internally, and we hide it from users. Adjust the
   // provided index to point to one of the actual buffers.
-  return s_plan_->non_const_buffer_sizes()->Get(index + 1);
+  int64_t size = s_plan_->non_const_buffer_sizes()->Get(index + 1);
+  ET_CHECK_OR_RETURN_ERROR(
+      size >= 0,
+      InvalidProgram,
+      "memory_planned_buffer_size(%zu) has invalid negative size: %" PRId64,
+      index,
+      size);
+  return size;
 }
 
 bool MethodMeta::uses_backend(const char* backend_name) const {
