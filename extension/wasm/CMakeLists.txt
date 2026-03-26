@@ -63,6 +63,10 @@ target_compile_options(executorch_wasm PUBLIC ${_common_compile_options})
 target_include_directories(
   executorch_wasm PUBLIC ${_common_include_directories}
 )
+if(EXECUTORCH_BUILD_WEBGPU)
+  list(APPEND link_libraries webgpu_backend)
+endif()
+
 target_link_libraries(
   executorch_wasm
   PUBLIC ${link_libraries}
