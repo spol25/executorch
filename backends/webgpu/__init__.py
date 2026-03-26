@@ -1,0 +1,12 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+from executorch.backends.webgpu.partitioner.webgpu_partitioner import (
+    WebGPUPartitioner,
+)
+from executorch.backends.webgpu.webgpu_preprocess import WebGPUBackend
+
+__all__ = ["WebGPUBackend", "WebGPUPartitioner"]
