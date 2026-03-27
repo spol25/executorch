@@ -7,7 +7,8 @@
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 add_subdirectory(json)
 # hexagon toolchain does not support mkdir, which is used in gflags.
-if(NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES Hexagon)
+# Emscripten's check_size probes fail for uint32_t under Wasm.
+if(NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES Hexagon AND NOT EMSCRIPTEN)
   add_subdirectory(gflags)
 endif()
 

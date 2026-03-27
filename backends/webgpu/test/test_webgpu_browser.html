@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>ExecuTorch WebGPU Test</title>
+<style>
+  body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #eee; }
+  #log { white-space: pre-wrap; }
+  .pass { color: #4caf50; font-weight: bold; }
+  .fail { color: #f44336; font-weight: bold; }
+  .info { color: #999; }
+</style>
+</head>
+<body>
+<h2>ExecuTorch WebGPU Runtime Test</h2>
+<div id="log"></div>
+<script src="./executorch_wasm.js"></script>
+<script>
+const log = document.getElementById('log');
+function print(msg, cls) {
+  const line = document.createElement('div');
+  line.textContent = msg;
+  if (cls) line.className = cls;
+  log.appendChild(line);
+}
+
+async function run() {
+  try {
+    print('Step 1: Checking WebGPU support...');
+    if (!navigator.gpu) {
+      print('FAIL: WebGPU not available in this browser', 'fail');
+      return;
+    }
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) {
+      print('FAIL: No WebGPU adapter found', 'fail');
+      return;
+    }
+    const device = await adapter.requestDevice();
+    const info = adapter.info || {};
+    print('  Adapter: ' + (info.description || info.device || 'unknown'), 'info');
+    print('  Vendor:  ' + (info.vendor || 'unknown'), 'info');
+    print('  Backend: ' + (info.architecture || 'unknown'), 'info');
+
+    print('Step 2: Loading Wasm module...');
+    if (typeof createModule !== 'function') {
+      print('FAIL: createModule not found (executorch_wasm.js failed to load)', 'fail');
+      return;
+    }
+    const Module = await createModule({
+      preinitializedWebGPUDevice: device,
+    });
+    print('  Wasm module loaded', 'info');
+
+    print('Step 3: Loading model...');
+    const resp = await fetch('./webgpu_add_test.pte');
+    if (!resp.ok) {
+      print('FAIL: Could not fetch webgpu_add_test.pte', 'fail');
+      return;
+    }
+    const pteBuffer = new Uint8Array(await resp.arrayBuffer());
+    const model = await Module.Module.load(pteBuffer);
+    await model.loadMethod('forward');
+    print('  Model loaded', 'info');
+
+    const dim = 1024;
+    const size = dim * dim;
+    print('Step 4: Running inference (' + dim + 'x' + dim + ' add)...');
+    const aData = new Array(size);
+    const bData = new Array(size);
+    for (let i = 0; i < size; i++) {
+      aData[i] = Math.random();
+      bData[i] = Math.random();
+    }
+    const a = Module.Tensor.fromArray([dim, dim], aData);
+    const b = Module.Tensor.fromArray([dim, dim], bData);
+
+    await model.forward([a, b]);
+
+    const numRuns = 10;
+    const times = [];
+    for (let r = 0; r < numRuns; r++) {
+      const t0 = performance.now();
+      await model.forward([a, b]);
+      const t1 = performance.now();
+      times.push(t1 - t0);
+    }
+    const avg = times.reduce((s, t) => s + t, 0) / numRuns;
+    const min = Math.min(...times);
+    const max = Math.max(...times);
+    print('  ' + numRuns + ' runs: avg=' + avg.toFixed(2) + 'ms  min=' + min.toFixed(2) + 'ms  max=' + max.toFixed(2) + 'ms', 'info');
+    print('  Throughput: ' + ((size * 4 * 2) / (avg / 1000) / 1e9).toFixed(2) + ' GB/s', 'info');
+
+    print('Step 5: Verifying output...');
+    const output = await model.forward([a, b]);
+    const outTensor = Array.isArray(output) ? output[0] : output;
+    if (!outTensor || !outTensor.data) {
+      print('FAIL: Could not extract output tensor', 'fail');
+      return;
+    }
+    const outputData = outTensor.data;
+    let maxError = 0;
+    for (let i = 0; i < Math.min(size, 1024); i++) {
+      const expected = aData[i] + bData[i];
+      const error = Math.abs(outputData[i] - expected);
+      maxError = Math.max(maxError, error);
+    }
+    print('  Checked 1024 elements, max error: ' + maxError.toExponential(2), 'info');
+
+    if (maxError > 1e-3) {
+      print('FAIL: max error ' + maxError + ' exceeds tolerance 1e-3', 'fail');
+    } else {
+      print('PASS: WebGPU add test (' + dim + 'x' + dim + ', ' + avg.toFixed(2) + 'ms avg)', 'pass');
+    }
+
+    device.destroy();
+  } catch (e) {
+    print('FAIL: ' + e.message, 'fail');
+    console.error(e);
+  }
+}
+
+run();
+</script>
+</body>
+</html>

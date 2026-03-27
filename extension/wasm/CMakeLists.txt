@@ -73,6 +73,24 @@ target_link_libraries(
   INTERFACE executorch_kernels
 )
 
+# Produce a linkable .js + .wasm module from the object library.
+add_executable(executorch_wasm_module)
+target_link_libraries(executorch_wasm_module PRIVATE executorch_wasm
+                      executorch_kernels)
+target_link_options(
+  executorch_wasm_module PRIVATE -lembind -sMODULARIZE=1
+  -sEXPORT_NAME=createModule -sALLOW_MEMORY_GROWTH=1
+  -sENVIRONMENT=web,node
+)
+if(EXECUTORCH_BUILD_WEBGPU)
+  target_link_options(executorch_wasm_module PRIVATE -sASYNCIFY
+                      -sASYNCIFY_STACK_SIZE=65536)
+endif()
+set_target_properties(
+  executorch_wasm_module PROPERTIES OUTPUT_NAME "executorch_wasm"
+                                    SUFFIX ".js"
+)
+
 if(BUILD_TESTING)
   add_subdirectory(test)
 endif()
