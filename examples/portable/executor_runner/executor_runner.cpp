@@ -56,7 +56,7 @@
 
 static uint8_t method_allocator_pool[4 * 1024U * 1024U]; // 4 MB
 
-static uint8_t temp_allocator_pool[1024U * 1024U];
+static uint8_t temp_allocator_pool[8U * 1024U * 1024U];
 
 DEFINE_string(
     model_path,

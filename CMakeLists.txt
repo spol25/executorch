@@ -1270,11 +1270,6 @@ if(EXECUTORCH_BUILD_EXECUTOR_RUNNER)
       executor_runner
       PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,executorch_delegate_ethos_u>
     )
-    # Wrap static linking like the delegate_runner to keep images
-    # self-contained.
-    target_link_options(
-      executor_runner PRIVATE -static-libstdc++ -static-libgcc
-    )
   endif()
 
   # Automatically set when using `emcmake cmake` for Wasm build.

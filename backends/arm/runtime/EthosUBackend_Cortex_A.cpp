@@ -17,8 +17,11 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <poll.h>
 #include <stdexcept>
 #include <string>
+#include <sys/ioctl.h>
+#include <unistd.h>
 #include <vector>
 
 #include <ethosu.hpp>
@@ -26,6 +29,17 @@
 
 #include <executorch/backends/arm/runtime/EthosUBackend_Internal.h>
 #include <executorch/runtime/core/error.h>
+
+#if defined(EXECUTORCH_ETHOSU_IMX93_PREBUILT)
+using EthosU::ETHOSU_UAPI_INFERENCE_MODEL;
+using EthosU::ETHOSU_UAPI_NETWORK_BUFFER;
+using EthosU::ETHOSU_UAPI_STATUS_OK;
+using EthosU::ethosu_uapi_cancel_inference_status;
+using EthosU::ethosu_uapi_inference_create;
+using EthosU::ethosu_uapi_network_info;
+using EthosU::ethosu_uapi_network_create;
+using EthosU::ethosu_uapi_result_status;
+#endif
 
 using executorch::runtime::ArrayRef;
 using executorch::runtime::BackendExecutionContext;
@@ -52,6 +66,14 @@ struct PlatformState {
 };
 
 namespace {
+
+size_t align_up(size_t value, size_t alignment) {
+  if (alignment == 0) {
+    return value;
+  }
+  const size_t remainder = value % alignment;
+  return remainder == 0 ? value : value + (alignment - remainder);
+}
 
 template <typename T>
 bool read_scalar_value(const CompileSpec& spec, T* out) {
@@ -150,6 +172,81 @@ EthosULinuxDeviceCache& get_linux_device_cache() {
   return cache;
 }
 
+#if defined(EXECUTORCH_ETHOSU_IMX93_PREBUILT)
+void log_memory_layout(const EthosU::MemoryLayout& layout) {
+  ET_LOG(
+      Info,
+      "Ethos-U layout flash_offset=%u arena_offset=%u input_count=%u output_count=%u",
+      static_cast<unsigned>(layout.flash_offset),
+      static_cast<unsigned>(layout.arena_offset),
+      static_cast<unsigned>(layout.input_count),
+      static_cast<unsigned>(layout.output_count));
+
+  for (uint32_t i = 0; i < layout.input_count; ++i) {
+    ET_LOG(
+        Info,
+        "Ethos-U layout input[%u] offset=%u size=%u",
+        static_cast<unsigned>(i),
+        static_cast<unsigned>(layout.input_offset[i]),
+        static_cast<unsigned>(layout.input_size[i]));
+  }
+
+  for (uint32_t i = 0; i < layout.output_count; ++i) {
+    ET_LOG(
+        Info,
+        "Ethos-U layout output[%u] offset=%u size=%u",
+        static_cast<unsigned>(i),
+        static_cast<unsigned>(layout.output_offset[i]),
+        static_cast<unsigned>(layout.output_size[i]));
+  }
+}
+
+void log_network_info(const ethosu_uapi_network_info& info) {
+  ET_LOG(
+      Info,
+      "Ethos-U network_info desc='%s' is_vela=%u ifm_count=%u ofm_count=%u",
+      info.desc,
+      static_cast<unsigned>(info.is_vela),
+      static_cast<unsigned>(info.ifm_count),
+      static_cast<unsigned>(info.ofm_count));
+
+  for (uint32_t i = 0; i < info.ifm_count; ++i) {
+    ET_LOG(
+        Info,
+        "Ethos-U network_info ifm[%u] size=%u type=%u offset=%u dims=%u",
+        static_cast<unsigned>(i),
+        static_cast<unsigned>(info.ifm_size[i]),
+        static_cast<unsigned>(info.ifm_types[i]),
+        static_cast<unsigned>(info.ifm_offset[i]),
+        static_cast<unsigned>(info.ifm_dims[i]));
+  }
+
+  for (uint32_t i = 0; i < info.ofm_count; ++i) {
+    ET_LOG(
+        Info,
+        "Ethos-U network_info ofm[%u] size=%u type=%u offset=%u dims=%u",
+        static_cast<unsigned>(i),
+        static_cast<unsigned>(info.ofm_size[i]),
+        static_cast<unsigned>(info.ofm_types[i]),
+        static_cast<unsigned>(info.ofm_offset[i]),
+        static_cast<unsigned>(info.ofm_dims[i]));
+  }
+}
+
+void log_result_status(const char* label, const ethosu_uapi_result_status& status) {
+  ET_LOG(
+      Info,
+      "%s status=%u cycle_count=%llu pmu=[%u,%u,%u,%u]",
+      label,
+      static_cast<unsigned>(status.status),
+      static_cast<unsigned long long>(status.pmu_count.cycle_count),
+      static_cast<unsigned>(status.pmu_count.events[0]),
+      static_cast<unsigned>(status.pmu_count.events[1]),
+      static_cast<unsigned>(status.pmu_count.events[2]),
+      static_cast<unsigned>(status.pmu_count.events[3]));
+}
+#endif
+
 /*
  * Used for logging when building in Debug mode, but unused building
  * for Release.
@@ -169,8 +266,10 @@ EthosULinuxDeviceCache& get_linux_device_cache() {
       return "ABORTED";
     case EthosU::InferenceStatus::ABORTING:
       return "ABORTING";
+#if !defined(EXECUTORCH_ETHOSU_IMX93_PREBUILT)
     case EthosU::InferenceStatus::PENDING:
       return "PENDING";
+#endif
   }
   return "UNKNOWN";
 }
@@ -189,6 +288,256 @@ Error invoke_linux_driver(
 
   try {
     EthosU::Device& device = get_linux_device_cache().get(options.device_path);
+#if defined(EXECUTORCH_ETHOSU_IMX93_PREBUILT)
+    ET_LOG(
+        Info,
+        "Ethos-U prebuilt invoke cmd=%zu weight=%zu scratch=%zu inputs=%d outputs=%d",
+        handles.cmd_data_size,
+        handles.weight_data_size,
+        handles.scratch_data_size,
+        handles.inputs != nullptr ? handles.inputs->count : 0,
+        handles.outputs != nullptr ? handles.outputs->count : 0);
+    auto network_buffer =
+        std::make_shared<EthosU::Buffer>(device, handles.cmd_data_size);
+    network_buffer->resize(handles.cmd_data_size, 0);
+    std::memcpy(network_buffer->data(), handles.cmd_data, handles.cmd_data_size);
+    ethosu_uapi_network_create network_create{};
+    network_create.type = ETHOSU_UAPI_NETWORK_BUFFER;
+    network_create.fd = network_buffer->getFd();
+    int network_fd =
+        device.ioctl(ETHOSU_IOCTL_NETWORK_CREATE, static_cast<void*>(&network_create));
+
+    ethosu_uapi_network_info network_info{};
+    if (::ioctl(network_fd, ETHOSU_IOCTL_NETWORK_INFO, &network_info) < 0) {
+      ET_LOG(
+          Error,
+          "Failed to query Ethos-U network info: errno=%d (%s)",
+          errno,
+          std::strerror(errno));
+      ::close(network_fd);
+      return Error::InvalidState;
+    }
+    log_network_info(network_info);
+
+    size_t max_io_end = 0;
+    for (int i = 0; handles.inputs != nullptr && i < handles.inputs->count; ++i) {
+      max_io_end = std::max(
+          max_io_end,
+          static_cast<size_t>(handles.inputs->io[i].offset) + input_copy_sizes[i]);
+    }
+    for (int i = 0; handles.outputs != nullptr && i < handles.outputs->count; ++i) {
+      max_io_end = std::max(
+          max_io_end,
+          static_cast<size_t>(handles.outputs->io[i].offset) +
+              output_copy_sizes[i]);
+    }
+
+    EthosU::MemoryLayout layout{};
+    layout.flash_offset = 0;
+    layout.arena_offset = align_up(handles.weight_data_size, 16);
+    layout.input_count =
+        static_cast<uint32_t>(handles.inputs != nullptr ? handles.inputs->count : 0);
+    layout.output_count = static_cast<uint32_t>(
+        handles.outputs != nullptr ? handles.outputs->count : 0);
+
+    const size_t arena_bytes = std::max(handles.scratch_data_size, max_io_end);
+    auto arena_buffer = std::make_shared<EthosU::Buffer>(
+        device, layout.arena_offset + arena_bytes);
+    arena_buffer->resize(layout.arena_offset + arena_bytes, 0);
+    std::memset(arena_buffer->data(), 0, layout.arena_offset + arena_bytes);
+
+    if (handles.weight_data_size > 0) {
+      std::memcpy(
+          arena_buffer->data() + layout.flash_offset,
+          handles.weight_data,
+          handles.weight_data_size);
+    }
+
+    for (int i = 0; handles.inputs != nullptr && i < handles.inputs->count; ++i) {
+      const size_t copy_size = input_copy_sizes[i];
+      layout.input_offset[i] = static_cast<uint32_t>(
+          layout.arena_offset + static_cast<size_t>(handles.inputs->io[i].offset));
+      layout.input_size[i] = static_cast<uint32_t>(copy_size);
+      if (copy_size == 0) {
+        continue;
+      }
+      const char* src = input_ptrs[i];
+      if (src == nullptr) {
+        ET_LOG(Error, "Missing input buffer for index %d", static_cast<int>(i));
+        return Error::InvalidState;
+      }
+      std::memcpy(arena_buffer->data() + layout.input_offset[i], src, copy_size);
+    }
+
+    for (int i = 0; handles.outputs != nullptr && i < handles.outputs->count; ++i) {
+      layout.output_offset[i] = static_cast<uint32_t>(
+          layout.arena_offset + static_cast<size_t>(handles.outputs->io[i].offset));
+      layout.output_size[i] = static_cast<uint32_t>(output_copy_sizes[i]);
+    }
+    log_memory_layout(layout);
+
+    ethosu_uapi_inference_create inference_create{};
+    inference_create.ifm_count =
+        static_cast<uint32_t>(handles.inputs != nullptr ? handles.inputs->count : 0);
+    for (uint32_t i = 0; i < inference_create.ifm_count; ++i) {
+      inference_create.ifm_fd[i] =
+          static_cast<uint32_t>(arena_buffer->getFd());
+    }
+    inference_create.ofm_count =
+        static_cast<uint32_t>(handles.outputs != nullptr ? handles.outputs->count : 0);
+    for (uint32_t i = 0; i < inference_create.ofm_count; ++i) {
+      inference_create.ofm_fd[i] =
+          static_cast<uint32_t>(arena_buffer->getFd());
+    }
+    inference_create.memory_layout = layout;
+    inference_create.inference_type = ETHOSU_UAPI_INFERENCE_MODEL;
+    for (size_t i = 0; i < options.pmu_events.size() &&
+         i < ETHOSU_PMU_EVENT_MAX;
+         ++i) {
+      inference_create.pmu_config.events[i] = options.pmu_events[i];
+    }
+    inference_create.pmu_config.cycle_count =
+        options.enable_cycle_counter ? 1U : 0U;
+
+    int inference_fd =
+        ::ioctl(network_fd, ETHOSU_IOCTL_INFERENCE_CREATE, &inference_create);
+    if (inference_fd < 0) {
+      ET_LOG(
+          Error,
+          "Failed to create Ethos-U inference: errno=%d (%s)",
+          errno,
+          std::strerror(errno));
+      ::close(network_fd);
+      return Error::InvalidState;
+    }
+
+    ethosu_uapi_result_status invoke_status{};
+    if (::ioctl(inference_fd, ETHOSU_IOCTL_INFERENCE_INVOKE, &invoke_status) < 0) {
+      ET_LOG(
+          Error,
+          "Failed to invoke Ethos-U inference: errno=%d (%s)",
+          errno,
+          std::strerror(errno));
+      ::close(inference_fd);
+      ::close(network_fd);
+      return Error::InvalidState;
+    }
+    log_result_status("Ethos-U invoke_status", invoke_status);
+
+    pollfd pfd{};
+    pfd.fd = inference_fd;
+    pfd.events = POLLIN | POLLERR;
+    const int timeout_ms = options.timeout_ns <= 0
+        ? -1
+        : static_cast<int>(options.timeout_ns / 1000000LL);
+    const int poll_ret = ::poll(&pfd, 1, timeout_ms);
+    if (poll_ret == 0) {
+      ET_LOG(
+          Error,
+          "Ethos-U inference poll timed out after %lld ns revents=0x%x",
+          static_cast<long long>(options.timeout_ns),
+          static_cast<unsigned>(pfd.revents));
+      ethosu_uapi_result_status timeout_status{};
+      if (::ioctl(inference_fd, ETHOSU_IOCTL_INFERENCE_STATUS, &timeout_status) == 0) {
+        log_result_status("Ethos-U timeout status before cancel", timeout_status);
+      } else {
+        ET_LOG(
+            Error,
+            "Failed to read timeout status: errno=%d (%s)",
+            errno,
+            std::strerror(errno));
+      }
+      ethosu_uapi_cancel_inference_status cancel_status{};
+      if (::ioctl(inference_fd, ETHOSU_IOCTL_INFERENCE_CANCEL, &cancel_status) == 0) {
+        ET_LOG(
+            Info,
+            "Ethos-U cancel status=%u",
+            static_cast<unsigned>(cancel_status.status));
+      } else {
+        ET_LOG(
+            Error,
+            "Failed to cancel timed out inference: errno=%d (%s)",
+            errno,
+            std::strerror(errno));
+      }
+      ethosu_uapi_result_status after_cancel_status{};
+      if (::ioctl(inference_fd, ETHOSU_IOCTL_INFERENCE_STATUS, &after_cancel_status) == 0) {
+        log_result_status("Ethos-U timeout status after cancel", after_cancel_status);
+      } else {
+        ET_LOG(
+            Error,
+            "Failed to read post-cancel status: errno=%d (%s)",
+            errno,
+            std::strerror(errno));
+      }
+      ET_LOG(
+          Error,
+          "Ethos-U inference timed out after %lld ns",
+          static_cast<long long>(options.timeout_ns));
+      ::close(inference_fd);
+      ::close(network_fd);
+      return Error::InvalidState;
+    }
+    if (poll_ret < 0) {
+      ET_LOG(
+          Error,
+          "Ethos-U inference poll failed errno=%d (%s)",
+          errno,
+          std::strerror(errno));
+      ::close(inference_fd);
+      ::close(network_fd);
+      return Error::InvalidState;
+    }
+    ET_LOG(
+        Info,
+        "Ethos-U inference poll completed revents=0x%x",
+        static_cast<unsigned>(pfd.revents));
+
+    ethosu_uapi_result_status status{};
+    if (::ioctl(inference_fd, ETHOSU_IOCTL_INFERENCE_STATUS, &status) < 0) {
+      ET_LOG(
+          Error,
+          "Failed to read Ethos-U inference status: errno=%d (%s)",
+          errno,
+          std::strerror(errno));
+      ::close(inference_fd);
+      ::close(network_fd);
+      return Error::InvalidState;
+    }
+    log_result_status("Ethos-U final status", status);
+
+    if (status.status != ETHOSU_UAPI_STATUS_OK) {
+      ET_LOG(
+          Error,
+          "Ethos-U inference failed with status %u",
+          static_cast<unsigned>(status.status));
+      ::close(inference_fd);
+      ::close(network_fd);
+      return Error::InvalidState;
+    }
+
+    if (options.enable_cycle_counter) {
+      ET_LOG(
+          Info,
+          "Ethos-U Linux delegate cycle counter: %llu",
+          static_cast<unsigned long long>(status.pmu_count.cycle_count));
+    }
+
+    for (int i = 0; i < handles.outputs->count; ++i) {
+      const size_t copy_size = output_copy_sizes[i];
+      if (copy_size == 0) {
+        continue;
+      }
+      char* dst = output_ptrs[i];
+      if (dst == nullptr) {
+        ET_LOG(Error, "Missing output buffer for index %d", i);
+        return Error::InvalidState;
+      }
+      std::memcpy(dst, arena_buffer->data() + layout.output_offset[i], copy_size);
+    }
+    ::close(inference_fd);
+    ::close(network_fd);
+#else
     auto network = std::make_shared<EthosU::Network>(
         device,
         reinterpret_cast<const unsigned char*>(handles.cmd_data),
@@ -314,6 +663,7 @@ Error invoke_linux_driver(
       }
       ofm_buffers[i]->read(dst, copy_size);
     }
+#endif
   } catch (const std::exception& e) {
     ET_LOG(Error, "Ethos-U Linux driver invocation failed: %s", e.what());
     return Error::InvalidState;

@@ -79,33 +79,61 @@ if(EXECUTORCH_BUILD_ARM_BAREMETAL OR EXECUTORCH_BUILD_ARM_ETHOSU_LINUX)
       executorch_delegate_ethos_u
       PRIVATE ${EXECUTORCH_ROOT}/backends/arm/runtime/EthosUBackend_Cortex_A.cpp
     )
-    if(NOT ETHOSU_LINUX_DRIVER_SOURCE_DIR
-       OR NOT EXISTS
-          "${ETHOSU_LINUX_DRIVER_SOURCE_DIR}/driver_library/src/ethosu.cpp"
+    set(
+      EXECUTORCH_ARM_ETHOSU_PREBUILT_LIB
+      ""
+      CACHE FILEPATH
+            "Path to a prebuilt Ethos-U userspace library such as libethosu.so"
     )
-      include(FetchContent)
-      FetchContent_Declare(
-        ethosu_linux_driver_src
-        GIT_REPOSITORY ${ETHOSU_LINUX_DRIVER_GIT_REPO}
-        GIT_TAG ${ETHOSU_LINUX_DRIVER_GIT_TAG}
-        GIT_SHALLOW TRUE
-      )
-      FetchContent_GetProperties(ethosu_linux_driver_src)
-      if(NOT ethosu_linux_driver_src_POPULATED)
-        FetchContent_Populate(ethosu_linux_driver_src)
-      endif()
-      set(ETHOSU_LINUX_DRIVER_SOURCE_DIR ${ethosu_linux_driver_src_SOURCE_DIR})
-    endif()
+    set(
+      EXECUTORCH_ARM_ETHOSU_PREBUILT_INCLUDE_DIR
+      "${EXECUTORCH_ROOT}/backends/arm/third-party/imx93_ethosu/include"
+      CACHE PATH
+            "Header directory for the prebuilt Ethos-U userspace library"
+    )
 
-    target_include_directories(
-      executorch_delegate_ethos_u
-      PRIVATE ${ETHOSU_LINUX_DRIVER_SOURCE_DIR}/driver_library/include
-              ${ETHOSU_LINUX_DRIVER_SOURCE_DIR}/kernel/include
-    )
-    target_sources(
-      executorch_delegate_ethos_u
-      PRIVATE ${ETHOSU_LINUX_DRIVER_SOURCE_DIR}/driver_library/src/ethosu.cpp
-    )
+    if(EXECUTORCH_ARM_ETHOSU_PREBUILT_LIB)
+      target_compile_definitions(
+        executorch_delegate_ethos_u
+        PRIVATE EXECUTORCH_ETHOSU_IMX93_PREBUILT=1
+      )
+      target_include_directories(
+        executorch_delegate_ethos_u
+        PRIVATE ${EXECUTORCH_ARM_ETHOSU_PREBUILT_INCLUDE_DIR}
+      )
+      target_link_libraries(
+        executorch_delegate_ethos_u
+        PUBLIC ${EXECUTORCH_ARM_ETHOSU_PREBUILT_LIB}
+      )
+    else()
+      if(NOT ETHOSU_LINUX_DRIVER_SOURCE_DIR
+         OR NOT EXISTS
+            "${ETHOSU_LINUX_DRIVER_SOURCE_DIR}/driver_library/src/ethosu.cpp"
+      )
+        include(FetchContent)
+        FetchContent_Declare(
+          ethosu_linux_driver_src
+          GIT_REPOSITORY ${ETHOSU_LINUX_DRIVER_GIT_REPO}
+          GIT_TAG ${ETHOSU_LINUX_DRIVER_GIT_TAG}
+          GIT_SHALLOW TRUE
+        )
+        FetchContent_GetProperties(ethosu_linux_driver_src)
+        if(NOT ethosu_linux_driver_src_POPULATED)
+          FetchContent_Populate(ethosu_linux_driver_src)
+        endif()
+        set(ETHOSU_LINUX_DRIVER_SOURCE_DIR ${ethosu_linux_driver_src_SOURCE_DIR})
+      endif()
+
+      target_include_directories(
+        executorch_delegate_ethos_u
+        PRIVATE ${ETHOSU_LINUX_DRIVER_SOURCE_DIR}/driver_library/include
+                ${ETHOSU_LINUX_DRIVER_SOURCE_DIR}/kernel/include
+      )
+      target_sources(
+        executorch_delegate_ethos_u
+        PRIVATE ${ETHOSU_LINUX_DRIVER_SOURCE_DIR}/driver_library/src/ethosu.cpp
+      )
+    endif()
   endif()
 
   install(TARGETS executorch_delegate_ethos_u EXPORT ExecuTorchTargets)
