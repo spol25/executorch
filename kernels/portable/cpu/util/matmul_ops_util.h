@@ -64,12 +64,18 @@ void bmm_out_impl(const Tensor& in, const Tensor& mat2, Tensor& out) {
     CTYPE* out_data_offset = out_data + b * m * p;
 
     for (const auto i : c10::irange(m)) {
+      CTYPE* out_row = out_data_offset + i * p;
       for (const auto j : c10::irange(p)) {
-        CTYPE sum = static_cast<CTYPE>(0.0);
-        for (const auto k : c10::irange(n)) {
-          sum += in_data_offset[i * n + k] * mat2_data_offset[k * p + j];
+        out_row[j] = static_cast<CTYPE>(0);
+      }
+
+      const CTYPE* in_row = in_data_offset + i * n;
+      for (const auto k : c10::irange(n)) {
+        const CTYPE lhs = in_row[k];
+        const CTYPE* mat2_row = mat2_data_offset + k * p;
+        for (const auto j : c10::irange(p)) {
+          out_row[j] += lhs * mat2_row[j];
         }
-        out_data_offset[i * p + j] = sum;
       }
     }
   }

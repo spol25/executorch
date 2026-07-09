@@ -310,14 +310,13 @@ Error invoke_linux_driver(
     ethosu_uapi_network_info network_info{};
     if (::ioctl(network_fd, ETHOSU_IOCTL_NETWORK_INFO, &network_info) < 0) {
       ET_LOG(
-          Error,
-          "Failed to query Ethos-U network info: errno=%d (%s)",
+          Info,
+          "Skipping Ethos-U network info query after errno=%d (%s); using lowered PTE IO metadata",
           errno,
           std::strerror(errno));
-      ::close(network_fd);
-      return Error::InvalidState;
+    } else {
+      log_network_info(network_info);
     }
-    log_network_info(network_info);
 
     size_t max_io_end = 0;
     for (int i = 0; handles.inputs != nullptr && i < handles.inputs->count; ++i) {

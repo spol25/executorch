@@ -51,6 +51,7 @@ from executorch.exir import (
     ExecutorchBackendConfig,
     to_edge_transform_and_lower,
 )
+from executorch.exir.passes.quantize_io_pass import QuantizeInputs, QuantizeOutputs
 
 from executorch.extension.export_util.utils import save_pte_program
 from tabulate import tabulate  # type: ignore[import-untyped]
@@ -667,6 +668,17 @@ def _get_args():
         default=False,
         help="Flag for enabling direct drive.",
     )
+    parser.add_argument(
+        "--quantize_io",
+        action="store_true",
+        required=False,
+        default=False,
+        help=(
+            "Apply QuantizeInputs/QuantizeOutputs so the generated PTE uses "
+            "quantized external I/O instead of leaving FP32 quantize/dequantize "
+            "ops outside the delegated graph."
+        ),
+    )
     args = parser.parse_args()
 
     LOGGING_FORMAT = "[%(levelname)s %(asctime)s %(filename)s:%(lineno)s] %(message)s"
@@ -818,6 +830,7 @@ def _to_edge_TOSA_delegate(
     strict_export: bool,
     calibration_samples: Optional[List[Tuple[torch.Tensor, ...]]],
     direct_drive: bool,
+    quantize_io: bool,
 ):
     model_quant = None
     if quant_mode is not None:
@@ -844,7 +857,8 @@ def _to_edge_TOSA_delegate(
     # Replace quantized_decomposed::{quantize,dequantize}_per_tensor nodes
     # with cortex_m:: equivalents for int8 QDQ ops remaining outside the
     # delegated subgraph.
-    edge = _apply_replace_quant_nodes(edge, target, direct_drive)
+    if not quantize_io:
+        edge = _apply_replace_quant_nodes(edge, target, direct_drive)
 
     return model_quant, edge
 
@@ -926,6 +940,7 @@ def _to_edge_no_delegate(
     model_name: str,
     strict_export: bool,
     calibration_samples: Optional[List[Tuple[torch.Tensor, ...]]],
+    quantize_io: bool,
 ):
     model_quant = None
     if quant_mode is not None:
@@ -952,7 +967,8 @@ def _to_edge_no_delegate(
     # Replace quantized_decomposed::{quantize,dequantize}_per_tensor nodes
     # with cortex_m:: equivalents for int8 QDQ ops remaining outside the
     # delegated subgraph.
-    edge = _apply_replace_quant_nodes(edge, args.target, args.direct_drive)
+    if not quantize_io:
+        edge = _apply_replace_quant_nodes(edge, args.target, args.direct_drive)
 
     return model_quant, edge
 
@@ -1031,6 +1047,7 @@ def main() -> None:  # noqa: C901
             args.strict_export,
             calibration_samples,
             args.direct_drive,
+            args.quantize_io,
         )
     else:
         model_quant, edge = _to_edge_no_delegate(
@@ -1043,11 +1060,24 @@ def main() -> None:  # noqa: C901
             args.model_name,
             args.strict_export,
             calibration_samples,
+            args.quantize_io,
         )
 
     dump_delegation_info(edge, args.intermediates)
 
     edge_program_manager_copy = copy.deepcopy(edge)
+
+    if args.quantize_io:
+        method_name = next(iter(edge._edge_programs.keys()))
+        graph_module = edge.exported_program(method_name).graph_module
+        output_node = next(node for node in graph_module.graph.nodes if node.op == "output")
+        output_count = len(output_node.args[0])
+        edge = edge.transform(
+            passes=[
+                QuantizeInputs(edge, [0]),
+                QuantizeOutputs(edge, list(range(output_count))),
+            ]
+        )
 
     try:
         exec_prog = edge.to_executorch(

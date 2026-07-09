@@ -27,6 +27,7 @@ output_folder="."
 et_build_root="${et_root_dir}/arm_test"
 ethosu_tools_dir=${et_root_dir}/examples/arm/arm-scratch
 select_ops_list=""
+target_cpu=""
 
 build_bundleio_flags=" -DET_BUNDLE_IO=OFF "
 build_with_etdump_flags=" -DEXECUTORCH_ENABLE_EVENT_TRACER=OFF "
@@ -51,6 +52,8 @@ help() {
     echo "  --et_build_root=<FOLDER>             Build output root folder to use, defaults to ${et_build_root}"
     echo "  --ethosu_tools_dir=<FOLDER>          Path to your Ethos-U tools dir if you not using default: ${ethosu_tools_dir}"
     echo "  --toolchain=<TOOLCHAIN>              Toolchain can be specified (arm-none-eabi-gcc, arm-zephyr-eabi-gcc). Default: ${toolchain}"
+    echo "  --target_cpu=<CPU>                   Override the Cortex-M CPU passed to CMake, e.g. cortex-m33, cortex-m55, cortex-m85."
+    echo "                                       If omitted, the script infers cortex-m55 for ethos-u55 targets and cortex-m85 for ethos-u85 targets."
     echo "  --select_ops_list=<OPS>              Comma separated list of portable (non delagated) kernels to include Default: ${select_ops_list}"
     echo "                                         NOTE: This is used when select_ops_model is not possible to use, e.g. for semihosting or bundleio."
     echo "                                         See https://docs.pytorch.org/executorch/stable/kernel-library-selective-build.html for more information."
@@ -72,6 +75,7 @@ for arg in "$@"; do
         --et_build_root=*) et_build_root="${arg#*=}";;
         --ethosu_tools_dir=*) ethosu_tools_dir="${arg#*=}";;
         --toolchain=*) toolchain="${arg#*=}";;
+        --target_cpu=*) target_cpu="${arg#*=}";;
         --select_ops_list=*) select_ops_list="${arg#*=}";;
         *)
         ;;
@@ -151,13 +155,15 @@ fi
 mkdir -p "${output_folder}"
 output_folder=$(realpath ${output_folder})
 
-if [[ ${target} == *"ethos-u55"*  ]]; then
-    target_cpu=cortex-m55
-else
-    target_cpu=cortex-m85
+if [[ -z ${target_cpu} ]]; then
+    if [[ ${target} == *"ethos-u55"*  ]]; then
+        target_cpu=cortex-m55
+    else
+        target_cpu=cortex-m85
+    fi
 fi
 echo "--------------------------------------------------------------------------------"
-echo "Build Arm ${toolchain/-gcc/} executor_runner for ${target} PTE: ${pte_file} using ${system_config} ${memory_mode} ${extra_build_flags} to '${output_folder}'"
+echo "Build Arm ${toolchain/-gcc/} executor_runner for ${target} on ${target_cpu} PTE: ${pte_file} using ${system_config} ${memory_mode} ${extra_build_flags} to '${output_folder}'"
 echo "--------------------------------------------------------------------------------"
 
 cd ${et_root_dir}/examples/arm/executor_runner
