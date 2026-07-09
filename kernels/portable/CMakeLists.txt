@@ -27,7 +27,6 @@ set(_common_compile_options
 )
 
 include(${EXECUTORCH_ROOT}/tools/cmake/Utils.cmake)
-include(${EXECUTORCH_ROOT}/tools/cmake/Codegen.cmake)
 
 # Portable kernel sources TODO(larryliu0820): use buck2 to gather the sources
 file(GLOB_RECURSE _portable_kernels__srcs
@@ -35,15 +34,6 @@ file(GLOB_RECURSE _portable_kernels__srcs
 )
 list(FILTER _portable_kernels__srcs EXCLUDE REGEX "test/*.cpp")
 list(FILTER _portable_kernels__srcs EXCLUDE REGEX "codegen")
-# Generate C++ bindings to register kernels into both PyTorch (for AOT) and
-# Executorch (for runtime). Here select all ops in functions.yaml
-set(_yaml "${CMAKE_CURRENT_SOURCE_DIR}/functions.yaml")
-gen_selected_ops(LIB_NAME "portable_ops_lib" OPS_SCHEMA_YAML "${_yaml}")
-# Expect gen_selected_ops output file to be selected_operators.yaml
-generate_bindings_for_kernels(
-  LIB_NAME "portable_ops_lib" FUNCTIONS_YAML "${_yaml}"
-)
-message("Generated files ${gen_command_sources}")
 
 #
 # portable_kernels: Pure-C++ kernel library for ATen ops
@@ -55,6 +45,35 @@ target_link_libraries(
   portable_kernels PRIVATE executorch_core kernels_util_all_deps
 )
 target_compile_options(portable_kernels PUBLIC ${_common_compile_options})
+target_include_directories(
+  portable_kernels PUBLIC ${EXECUTORCH_ROOT} ${EXECUTORCH_ROOT}/src
+)
+
+if(EXECUTORCH_PORTABLE_BUILD_KERNELS_ONLY)
+  # The ARM bare-metal build enables global -Werror. When we reuse the full
+  # portable kernel library as a selective fallback path, unrelated portable
+  # kernels can otherwise fail the build on toolchain warnings before we ever
+  # get to link the requested op.
+  target_compile_options(portable_kernels PUBLIC -Wno-error)
+  install(
+    TARGETS portable_kernels
+    EXPORT ExecuTorchTargets
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  )
+  return()
+endif()
+
+include(${EXECUTORCH_ROOT}/tools/cmake/Codegen.cmake)
+
+# Generate C++ bindings to register kernels into both PyTorch (for AOT) and
+# Executorch (for runtime). Here select all ops in functions.yaml
+set(_yaml "${CMAKE_CURRENT_SOURCE_DIR}/functions.yaml")
+gen_selected_ops(LIB_NAME "portable_ops_lib" OPS_SCHEMA_YAML "${_yaml}")
+# Expect gen_selected_ops output file to be selected_operators.yaml
+generate_bindings_for_kernels(
+  LIB_NAME "portable_ops_lib" FUNCTIONS_YAML "${_yaml}"
+)
+message("Generated files ${gen_command_sources}")
 
 # Build a library for _portable_kernels__srcs
 #
